@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/google/uuid"
 	"go.emeland.io/modelsrv/pkg/client"
 	"go.uber.org/zap"
 )
@@ -13,12 +14,18 @@ func NewTestServer(scanners []ImageScanner, subscribers []*client.ModelSrvClient
 	return &Server{
 		scanners:     scanners,
 		subscribers:  subscribers,
-		pollInterval: time.Hour, // won't tick in tests
+		pollInterval: time.Hour,
 		log:          log,
+		known:        make(map[uuid.UUID]struct{}),
 	}
 }
 
 // ScanOnce exposes the internal scan method for testing.
 func (s *Server) ScanOnce(ctx context.Context) {
 	s.scan(ctx)
+}
+
+// KnownCount returns the number of tracked resource IDs (for test assertions).
+func (s *Server) KnownCount() int {
+	return len(s.known)
 }

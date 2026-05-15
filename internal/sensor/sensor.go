@@ -17,7 +17,8 @@ import (
 	"emeland.io/modelsrv-oci-registry-sensor/internal/scanner"
 )
 
-// artefactNamespace is the UUID v5 namespace for deriving deterministic Artefact IDs from digests.
+// artefactNamespace is the UUID v5 namespace for deriving deterministic IDs from digests.
+// This value is fixed and must never change — doing so would reassign all resource UUIDs.
 var artefactNamespace = uuid.MustParse("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
 // ImageScanner abstracts registry scanning for testability.
@@ -31,6 +32,8 @@ type Server struct {
 	subscribers  []*client.ModelSrvClient
 	pollInterval time.Duration
 	log          *zap.SugaredLogger
+	// known tracks previously emitted resource IDs for reconciliation (delete detection).
+	known map[uuid.UUID]struct{}
 }
 
 // New creates a sensor server from the given config.
@@ -63,6 +66,7 @@ func New(cfg *config.Config, log *zap.SugaredLogger) (*Server, error) {
 		subscribers:  subscribers,
 		pollInterval: poll,
 		log:          log,
+		known:        make(map[uuid.UUID]struct{}),
 	}, nil
 }
 
@@ -70,7 +74,6 @@ func New(cfg *config.Config, log *zap.SugaredLogger) (*Server, error) {
 func (s *Server) Run(ctx context.Context) error {
 	s.log.Infow("starting OCI registry sensor", "pollInterval", s.pollInterval, "registries", len(s.scanners))
 
-	// Initial scan.
 	s.scan(ctx)
 
 	ticker := time.NewTicker(s.pollInterval)
@@ -88,6 +91,8 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) scan(ctx context.Context) {
+	seen := make(map[uuid.UUID]struct{})
+
 	for _, sc := range s.scanners {
 		images, err := sc.Scan(ctx)
 		if err != nil {
@@ -96,30 +101,50 @@ func (s *Server) scan(ctx context.Context) {
 		}
 		s.log.Infow("scan complete", "images", len(images))
 		for _, img := range images {
-			s.emitArtefact(ctx, img)
+			if len(img.Tags) == 0 && img.Digest == "" {
+				continue
+			}
+			artID, instID := s.emitArtefact(ctx, img)
+			seen[artID] = struct{}{}
+			seen[instID] = struct{}{}
 		}
 	}
+
+	// Reconcile: delete resources that were previously known but not seen in this scan.
+	for id := range s.known {
+		if _, ok := seen[id]; !ok {
+			s.emitDelete(ctx, id)
+		}
+	}
+	s.known = seen
 }
 
-func (s *Server) emitArtefact(ctx context.Context, img scanner.Image) {
+func (s *Server) emitArtefact(ctx context.Context, img scanner.Image) (uuid.UUID, uuid.UUID) {
 	artefactID := artefactIDFromDigest(img.Digest)
 	instanceID := uuid.NewSHA1(artefactNamespace, []byte(img.Repository+"|"+img.Digest))
 
-	// Build tags annotation.
 	tagsJSON, _ := json.Marshal(img.Tags)
 
-	// Emit Artefact (create/update).
-	artefactEvent := &events.Event{
-		ResourceType: events.ArtifactResource,
-		Operation:    events.CreateOperation,
-		ResourceId:   artefactID,
-		Objects:      []any{artefactPayload(artefactID, img.Digest, img.Tags)},
+	op := events.CreateOperation
+	if _, exists := s.known[artefactID]; exists {
+		op = events.UpdateOperation
 	}
 
-	// Emit ArtefactInstance.
+	artefactEvent := &events.Event{
+		ResourceType: events.ArtifactResource,
+		Operation:    op,
+		ResourceId:   artefactID,
+		Objects:      []any{artefactPayload(artefactID, img)},
+	}
+
+	instanceOp := events.CreateOperation
+	if _, exists := s.known[instanceID]; exists {
+		instanceOp = events.UpdateOperation
+	}
+
 	instanceEvent := &events.Event{
 		ResourceType: events.ArtifactInstanceResource,
-		Operation:    events.CreateOperation,
+		Operation:    instanceOp,
 		ResourceId:   instanceID,
 		Objects:      []any{instancePayload(instanceID, artefactID, img.Repository, string(tagsJSON))},
 	}
@@ -132,25 +157,48 @@ func (s *Server) emitArtefact(ctx context.Context, img scanner.Image) {
 			s.log.Warnw("failed to push instance event", "id", instanceID, "error", err)
 		}
 	}
+	return artefactID, instanceID
 }
 
-// artefactIDFromDigest derives a deterministic UUID from the image digest.
+func (s *Server) emitDelete(ctx context.Context, id uuid.UUID) {
+	// We don't know if it's an Artefact or ArtefactInstance from the ID alone,
+	// but modelsrv's Apply ignores deletes for unknown IDs gracefully.
+	// Emit both; only the matching one will have effect.
+	for _, rt := range []events.ResourceType{events.ArtifactResource, events.ArtifactInstanceResource} {
+		ev := &events.Event{
+			ResourceType: rt,
+			Operation:    events.DeleteOperation,
+			ResourceId:   id,
+		}
+		for _, c := range s.subscribers {
+			if err := c.PostEvent(ctx, ev); err != nil {
+				s.log.Debugw("delete push failed (may be expected)", "id", id, "kind", rt, "error", err)
+			}
+		}
+	}
+}
+
 func artefactIDFromDigest(digest string) uuid.UUID {
 	return uuid.NewSHA1(artefactNamespace, []byte(digest))
 }
 
-func artefactPayload(id uuid.UUID, digest string, tags []string) map[string]any {
-	// Normalize digest to "SHA256:<hex>" format.
-	hash := digest
-	if strings.HasPrefix(digest, "sha256:") {
-		hash = "SHA256:" + strings.TrimPrefix(digest, "sha256:")
+func artefactPayload(id uuid.UUID, img scanner.Image) map[string]any {
+	hash := img.Digest
+	if strings.HasPrefix(img.Digest, "sha256:") {
+		hash = "SHA256:" + strings.TrimPrefix(img.Digest, "sha256:")
 	}
+	displayName := img.Digest[:19] + "..."
+	if len(img.Tags) > 0 {
+		displayName = img.Tags[0] + " (" + displayName + ")"
+	}
+	description := fmt.Sprintf("OCI image from %s", img.Repository)
 	return map[string]any{
 		"artifactId":  id.String(),
-		"displayName": tags[0] + " (" + digest[:19] + "...)",
+		"displayName": displayName,
+		"description": description,
 		"hash":        hash,
 		"annotations": []map[string]any{
-			{"key": "emeland.io/oci-registry-sensor/known-tags", "value": mustJSON(tags)},
+			{"key": "emeland.io/oci-registry-sensor/known-tags", "value": mustJSON(img.Tags)},
 		},
 	}
 }
@@ -159,6 +207,7 @@ func instancePayload(id, artefactID uuid.UUID, repository, tagsJSON string) map[
 	return map[string]any{
 		"artifactInstanceId": id.String(),
 		"displayName":        repository,
+		"description":        fmt.Sprintf("Copy in registry %s", repository),
 		"artifact":           artefactID.String(),
 		"annotations": []map[string]any{
 			{"key": "emeland.io/p8-artifact-instance-location", "value": mustJSON([]string{repository})},
