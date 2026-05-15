@@ -20,9 +20,14 @@ import (
 // artefactNamespace is the UUID v5 namespace for deriving deterministic Artefact IDs from digests.
 var artefactNamespace = uuid.MustParse("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
+// ImageScanner abstracts registry scanning for testability.
+type ImageScanner interface {
+	Scan(ctx context.Context) ([]scanner.Image, error)
+}
+
 // Server manages periodic scanning and event forwarding.
 type Server struct {
-	scanners     []*scanner.Scanner
+	scanners     []ImageScanner
 	subscribers  []*client.ModelSrvClient
 	pollInterval time.Duration
 	log          *zap.SugaredLogger
@@ -39,7 +44,7 @@ func New(cfg *config.Config, log *zap.SugaredLogger) (*Server, error) {
 		poll = d
 	}
 
-	var scanners []*scanner.Scanner
+	var scanners []ImageScanner
 	for _, reg := range cfg.Registries {
 		scanners = append(scanners, scanner.New(reg.URL, reg.Username, reg.Password, log))
 	}
