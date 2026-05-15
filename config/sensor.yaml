@@ -1,0 +1,9 @@
+subscribers:
+  - "http://localhost:8080/api/"
+
+pollInterval: "60s"
+
+registries:
+  - url: "https://registry.example.com"
+    username: ""
+    password: ""
