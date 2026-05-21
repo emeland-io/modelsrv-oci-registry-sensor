@@ -3,6 +3,7 @@ package sensor_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -67,7 +68,7 @@ func TestScanOnce_EmitsArtefactAndInstance(t *testing.T) {
 	}}
 
 	log := zap.NewNop().Sugar()
-	s := sensor.NewTestServer([]sensor.ImageScanner{mock}, []*client.ModelSrvClient{c}, log)
+	s := sensor.NewTestServer([]sensor.ImageScanner{mock}, nil, []*client.ModelSrvClient{c}, log)
 	s.ScanOnce(context.Background())
 
 	mu.Lock()
@@ -101,7 +102,7 @@ func TestScanOnce_UntaggedImage(t *testing.T) {
 	}}
 
 	log := zap.NewNop().Sugar()
-	s := sensor.NewTestServer([]sensor.ImageScanner{mock}, []*client.ModelSrvClient{c}, log)
+	s := sensor.NewTestServer([]sensor.ImageScanner{mock}, nil, []*client.ModelSrvClient{c}, log)
 	s.ScanOnce(context.Background())
 
 	mu.Lock()
@@ -125,7 +126,7 @@ func TestScanOnce_SecondScanEmitsUpdate(t *testing.T) {
 	mock := &mockScanner{images: []scanner.Image{img}}
 
 	log := zap.NewNop().Sugar()
-	s := sensor.NewTestServer([]sensor.ImageScanner{mock}, []*client.ModelSrvClient{c}, log)
+	s := sensor.NewTestServer([]sensor.ImageScanner{mock}, nil, []*client.ModelSrvClient{c}, log)
 
 	s.ScanOnce(context.Background()) // first scan: Create
 	s.ScanOnce(context.Background()) // second scan: Update
@@ -153,7 +154,7 @@ func TestScanOnce_DeleteOnRemoval(t *testing.T) {
 	mock := &mockScanner{images: []scanner.Image{img}}
 
 	log := zap.NewNop().Sugar()
-	s := sensor.NewTestServer([]sensor.ImageScanner{mock}, []*client.ModelSrvClient{c}, log)
+	s := sensor.NewTestServer([]sensor.ImageScanner{mock}, nil, []*client.ModelSrvClient{c}, log)
 
 	s.ScanOnce(context.Background()) // first scan: image present
 	assert.Equal(t, 2, s.KnownCount())
@@ -188,10 +189,10 @@ func TestDeterministicIDs(t *testing.T) {
 	}
 
 	log := zap.NewNop().Sugar()
-	s1 := sensor.NewTestServer([]sensor.ImageScanner{&mockScanner{images: []scanner.Image{img}}}, []*client.ModelSrvClient{c}, log)
+	s1 := sensor.NewTestServer([]sensor.ImageScanner{&mockScanner{images: []scanner.Image{img}}}, nil, []*client.ModelSrvClient{c}, log)
 	s1.ScanOnce(context.Background())
 
-	s2 := sensor.NewTestServer([]sensor.ImageScanner{&mockScanner{images: []scanner.Image{img}}}, []*client.ModelSrvClient{c}, log)
+	s2 := sensor.NewTestServer([]sensor.ImageScanner{&mockScanner{images: []scanner.Image{img}}}, nil, []*client.ModelSrvClient{c}, log)
 	s2.ScanOnce(context.Background())
 
 	mu.Lock()
@@ -200,4 +201,58 @@ func TestDeterministicIDs(t *testing.T) {
 	require.Len(t, *evts, 4)
 	assert.Equal(t, (*evts)[0].Resource["artifactId"], (*evts)[2].Resource["artifactId"])
 	assert.Equal(t, (*evts)[1].Resource["artifactInstanceId"], (*evts)[3].Resource["artifactInstanceId"])
+}
+
+type failingScanner struct{}
+
+func (f *failingScanner) Scan(_ context.Context) ([]scanner.Image, error) {
+	return nil, fmt.Errorf("connection refused")
+}
+
+func TestScanOnce_FailedScanDoesNotDelete(t *testing.T) {
+	srv, evts, mu := collectEvents(t)
+	defer srv.Close()
+
+	c, _ := client.NewModelSrvClient(srv.URL + "/")
+	img := scanner.Image{
+		Repository: "reg.io/app",
+		Digest:     "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+		Tags:       []string{"v1"},
+	}
+
+	// Use a scanner that succeeds on first call, then fails on subsequent calls.
+	mock := &toggleScanner{images: []scanner.Image{img}, failAfter: 1}
+
+	log := zap.NewNop().Sugar()
+	s := sensor.NewTestServer([]sensor.ImageScanner{mock}, nil, []*client.ModelSrvClient{c}, log)
+
+	// First scan succeeds — resources are created and tracked.
+	s.ScanOnce(context.Background())
+	assert.Equal(t, 2, s.KnownCount())
+
+	mu.Lock()
+	evtsBefore := len(*evts)
+	mu.Unlock()
+
+	// Second scan fails — should NOT emit deletes, known count preserved.
+	s.ScanOnce(context.Background())
+	assert.Equal(t, 2, s.KnownCount(), "known IDs should be preserved after failed scan")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, evtsBefore, len(*evts), "failed scan should not emit any events")
+}
+
+type toggleScanner struct {
+	images    []scanner.Image
+	failAfter int
+	calls     int
+}
+
+func (t *toggleScanner) Scan(_ context.Context) ([]scanner.Image, error) {
+	t.calls++
+	if t.calls > t.failAfter {
+		return nil, fmt.Errorf("connection refused")
+	}
+	return t.images, nil
 }

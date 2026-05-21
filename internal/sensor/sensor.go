@@ -28,12 +28,17 @@ type ImageScanner interface {
 
 // Server manages periodic scanning and event forwarding.
 type Server struct {
-	scanners     []ImageScanner
+	scanners     []registryScanner
 	subscribers  []*client.ModelSrvClient
 	pollInterval time.Duration
 	log          *zap.SugaredLogger
-	// known tracks previously emitted resource IDs for reconciliation (delete detection).
-	known map[uuid.UUID]struct{}
+	// knownByRegistry tracks previously emitted resource IDs per registry for reconciliation.
+	knownByRegistry map[string]map[uuid.UUID]struct{}
+}
+
+type registryScanner struct {
+	url     string
+	scanner ImageScanner
 }
 
 // New creates a sensor server from the given config.
@@ -47,9 +52,12 @@ func New(cfg *config.Config, log *zap.SugaredLogger) (*Server, error) {
 		poll = d
 	}
 
-	var scanners []ImageScanner
+	var scanners []registryScanner
 	for _, reg := range cfg.Registries {
-		scanners = append(scanners, scanner.New(reg.URL, reg.Username, reg.Password, log))
+		scanners = append(scanners, registryScanner{
+			url:     reg.URL,
+			scanner: scanner.New(reg.URL, reg.Username, reg.Password, log),
+		})
 	}
 
 	var subscribers []*client.ModelSrvClient
@@ -62,11 +70,11 @@ func New(cfg *config.Config, log *zap.SugaredLogger) (*Server, error) {
 	}
 
 	return &Server{
-		scanners:     scanners,
-		subscribers:  subscribers,
-		pollInterval: poll,
-		log:          log,
-		known:        make(map[uuid.UUID]struct{}),
+		scanners:        scanners,
+		subscribers:     subscribers,
+		pollInterval:    poll,
+		log:             log,
+		knownByRegistry: make(map[string]map[uuid.UUID]struct{}),
 	}, nil
 }
 
@@ -91,42 +99,46 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) scan(ctx context.Context) {
-	seen := make(map[uuid.UUID]struct{})
-
-	for _, sc := range s.scanners {
-		images, err := sc.Scan(ctx)
+	for i := range s.scanners {
+		rs := &s.scanners[i]
+		images, err := rs.scanner.Scan(ctx)
 		if err != nil {
-			s.log.Warnw("scan failed", "error", err)
+			s.log.Warnw("scan failed", "registry", rs.url, "error", err)
+			// Keep previous known IDs for this registry — don't reconcile on failure.
 			continue
 		}
-		s.log.Infow("scan complete", "images", len(images))
+		s.log.Infow("scan complete", "registry", rs.url, "images", len(images))
+
+		seen := make(map[uuid.UUID]struct{})
 		for _, img := range images {
 			if len(img.Tags) == 0 && img.Digest == "" {
 				continue
 			}
-			artID, instID := s.emitArtefact(ctx, img)
+			artID, instID := s.emitArtefact(ctx, rs.url, img)
 			seen[artID] = struct{}{}
 			seen[instID] = struct{}{}
 		}
-	}
 
-	// Reconcile: delete resources that were previously known but not seen in this scan.
-	for id := range s.known {
-		if _, ok := seen[id]; !ok {
-			s.emitDelete(ctx, id)
+		// Reconcile: delete IDs previously known for this registry but not seen now.
+		for id := range s.knownByRegistry[rs.url] {
+			if _, ok := seen[id]; !ok {
+				s.emitDelete(ctx, id)
+			}
 		}
+		s.knownByRegistry[rs.url] = seen
 	}
-	s.known = seen
 }
 
-func (s *Server) emitArtefact(ctx context.Context, img scanner.Image) (uuid.UUID, uuid.UUID) {
+func (s *Server) emitArtefact(ctx context.Context, regURL string, img scanner.Image) (uuid.UUID, uuid.UUID) {
 	artefactID := artefactIDFromDigest(img.Digest)
 	instanceID := uuid.NewSHA1(artefactNamespace, []byte(img.Repository+"|"+img.Digest))
 
 	tagsJSON, _ := json.Marshal(img.Tags)
 
+	known := s.knownByRegistry[regURL]
+
 	op := events.CreateOperation
-	if _, exists := s.known[artefactID]; exists {
+	if _, exists := known[artefactID]; exists {
 		op = events.UpdateOperation
 	}
 
@@ -138,7 +150,7 @@ func (s *Server) emitArtefact(ctx context.Context, img scanner.Image) (uuid.UUID
 	}
 
 	instanceOp := events.CreateOperation
-	if _, exists := s.known[instanceID]; exists {
+	if _, exists := known[instanceID]; exists {
 		instanceOp = events.UpdateOperation
 	}
 
