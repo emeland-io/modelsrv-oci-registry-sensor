@@ -203,12 +203,6 @@ func TestDeterministicIDs(t *testing.T) {
 	assert.Equal(t, (*evts)[1].Resource["artifactInstanceId"], (*evts)[3].Resource["artifactInstanceId"])
 }
 
-type failingScanner struct{}
-
-func (f *failingScanner) Scan(_ context.Context) ([]scanner.Image, error) {
-	return nil, fmt.Errorf("connection refused")
-}
-
 func TestScanOnce_FailedScanDoesNotDelete(t *testing.T) {
 	srv, evts, mu := collectEvents(t)
 	defer srv.Close()
