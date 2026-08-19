@@ -13,6 +13,9 @@ type Registry struct {
 	URL      string `yaml:"url"`
 	Username string `yaml:"username,omitempty"`
 	Password string `yaml:"password,omitempty"`
+	// Repositories limits scanning to these repo paths (e.g. "emeland-io/modelsrv").
+	// When empty, the sensor catalogs the entire registry (not supported by GHCR).
+	Repositories []string `yaml:"repositories,omitempty"`
 }
 
 // Config is the top-level sensor configuration.

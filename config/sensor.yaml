@@ -4,6 +4,13 @@ subscribers:
 pollInterval: "60s"
 
 registries:
-  - url: "https://registry.example.com"
+  # Prefer explicit repositories for GHCR (full catalog is denied).
+  - url: "ghcr.io"
     username: ""
     password: ""
+    repositories:
+      - "emeland-io/modelsrv"
+  # Catalog mode (requires a registry that allows registry:catalog:*):
+  # - url: "https://registry.example.com"
+  #   username: ""
+  #   password: ""

@@ -56,7 +56,7 @@ func New(cfg *config.Config, log *zap.SugaredLogger) (*Server, error) {
 	for _, reg := range cfg.Registries {
 		scanners = append(scanners, registryScanner{
 			url:     reg.URL,
-			scanner: scanner.New(reg.URL, reg.Username, reg.Password, log),
+			scanner: scanner.New(reg.URL, reg.Username, reg.Password, reg.Repositories, log),
 		})
 	}
 

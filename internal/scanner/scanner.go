@@ -23,13 +23,15 @@ type Image struct {
 
 // Scanner scans an OCI registry for images.
 type Scanner struct {
-	registryURL string
-	auth        authn.Authenticator
-	log         *zap.SugaredLogger
+	registryURL  string
+	repositories []string
+	auth         authn.Authenticator
+	log          *zap.SugaredLogger
 }
 
 // New creates a scanner for the given registry URL with optional credentials.
-func New(registryURL, username, password string, log *zap.SugaredLogger) *Scanner {
+// If repositories is non-empty, only those repos are scanned (skips registry catalog).
+func New(registryURL, username, password string, repositories []string, log *zap.SugaredLogger) *Scanner {
 	auth := authn.Anonymous
 	if username != "" {
 		auth = authn.FromConfig(authn.AuthConfig{
@@ -37,19 +39,27 @@ func New(registryURL, username, password string, log *zap.SugaredLogger) *Scanne
 			Password: password,
 		})
 	}
-	return &Scanner{registryURL: registryURL, auth: auth, log: log}
+	return &Scanner{
+		registryURL:  registryURL,
+		repositories: append([]string(nil), repositories...),
+		auth:         auth,
+		log:          log,
+	}
 }
 
-// Scan lists all repositories in the registry and discovers images with their digests and tags.
+// Scan discovers images with their digests and tags.
+// When repositories were configured, only those are scanned; otherwise the full registry is cataloged.
 func (s *Scanner) Scan(ctx context.Context) ([]Image, error) {
-	reg, err := name.NewRegistry(s.registryURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse registry %s: %w", s.registryURL, err)
-	}
-
-	repos, err := remote.Catalog(ctx, reg, remote.WithAuth(s.auth))
-	if err != nil {
-		return nil, fmt.Errorf("catalog %s: %w", s.registryURL, err)
+	repos := s.repositories
+	if len(repos) == 0 {
+		reg, err := name.NewRegistry(s.registryURL)
+		if err != nil {
+			return nil, fmt.Errorf("parse registry %s: %w", s.registryURL, err)
+		}
+		repos, err = remote.Catalog(ctx, reg, remote.WithAuth(s.auth))
+		if err != nil {
+			return nil, fmt.Errorf("catalog %s: %w", s.registryURL, err)
+		}
 	}
 
 	var images []Image

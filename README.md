@@ -16,6 +16,7 @@ See `config/sensor.yaml` for an example. Key fields:
 - `subscribers` — modelsrv API base URLs to push events to
 - `pollInterval` — how often to re-scan (e.g. `"60s"`, `"5m"`)
 - `registries` — list of OCI registries with URL and optional credentials
+  - `repositories` — optional list of repo paths (e.g. `emeland-io/modelsrv`). When set, skips full-registry catalog (required for GHCR). When empty, catalogs the entire registry.
 
 ## How it works
 
