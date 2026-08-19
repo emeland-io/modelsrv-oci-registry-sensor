@@ -21,6 +21,8 @@ registries:
     username: "user"
     password: "pass"
   - url: "ghcr.io"
+    repositories:
+      - "emeland-io/modelsrv"
 `
 	path := writeTempFile(t, content)
 	cfg, err := config.Load(path)
@@ -34,6 +36,7 @@ registries:
 	assert.Equal(t, "pass", cfg.Registries[0].Password)
 	assert.Equal(t, "ghcr.io", cfg.Registries[1].URL)
 	assert.Empty(t, cfg.Registries[1].Username)
+	assert.Equal(t, []string{"emeland-io/modelsrv"}, cfg.Registries[1].Repositories)
 }
 
 func TestLoad_NoRegistries(t *testing.T) {

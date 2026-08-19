@@ -32,7 +32,7 @@ func TestScan_FakeRegistry(t *testing.T) {
 	pushImage(t, regHost, "library/nginx", "latest")
 
 	log := zap.NewNop().Sugar()
-	sc := scanner.New(regHost, "", "", log)
+	sc := scanner.New(regHost, "", "", nil, log)
 	images, err := sc.Scan(context.Background())
 	require.NoError(t, err)
 
@@ -51,10 +51,29 @@ func TestScan_EmptyRegistry(t *testing.T) {
 	regHost := strings.TrimPrefix(srv.URL, "http://")
 
 	log := zap.NewNop().Sugar()
-	sc := scanner.New(regHost, "", "", log)
+	sc := scanner.New(regHost, "", "", nil, log)
 	images, err := sc.Scan(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, images)
+}
+
+func TestScan_ExplicitRepositories(t *testing.T) {
+	srv := httptest.NewServer(registry.New())
+	defer srv.Close()
+	regHost := strings.TrimPrefix(srv.URL, "http://")
+
+	pushImage(t, regHost, "myapp", "v1.0")
+	pushImage(t, regHost, "other/ignored", "latest")
+
+	log := zap.NewNop().Sugar()
+	sc := scanner.New(regHost, "", "", []string{"myapp"}, log)
+	images, err := sc.Scan(context.Background())
+	require.NoError(t, err)
+
+	require.NotEmpty(t, images)
+	for _, img := range images {
+		assert.Equal(t, regHost+"/myapp", img.Repository)
+	}
 }
 
 func TestScan_MultipleTagsSameDigest(t *testing.T) {
@@ -67,7 +86,7 @@ func TestScan_MultipleTagsSameDigest(t *testing.T) {
 	pushImageRef(t, regHost, "shared", "latest", img)
 
 	log := zap.NewNop().Sugar()
-	sc := scanner.New(regHost, "", "", log)
+	sc := scanner.New(regHost, "", "", nil, log)
 	images, err := sc.Scan(context.Background())
 	require.NoError(t, err)
 
