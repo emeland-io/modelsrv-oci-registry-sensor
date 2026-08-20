@@ -11,10 +11,16 @@ import (
 	"github.com/google/uuid"
 	"go.emeland.io/modelsrv/pkg/client"
 	"go.emeland.io/modelsrv/pkg/events"
+	"go.emeland.io/modelsrv/pkg/model/artifact"
 	"go.uber.org/zap"
 
 	"emeland.io/modelsrv-oci-registry-sensor/internal/config"
 	"emeland.io/modelsrv-oci-registry-sensor/internal/scanner"
+)
+
+const (
+	annotationKnownTags = "emeland.io/oci-registry-sensor/known-tags"
+	annotationLocation  = "emeland.io/p8-artifact-instance-location"
 )
 
 // artefactNamespace is the UUID v5 namespace for deriving deterministic IDs from digests.
@@ -146,7 +152,7 @@ func (s *Server) emitArtefact(ctx context.Context, regURL string, img scanner.Im
 		ResourceType: events.ArtifactResource,
 		Operation:    op,
 		ResourceId:   artefactID,
-		Objects:      []any{artefactPayload(artefactID, img)},
+		Objects:      []any{newArtefact(artefactID, img)},
 	}
 
 	instanceOp := events.CreateOperation
@@ -158,7 +164,7 @@ func (s *Server) emitArtefact(ctx context.Context, regURL string, img scanner.Im
 		ResourceType: events.ArtifactInstanceResource,
 		Operation:    instanceOp,
 		ResourceId:   instanceID,
-		Objects:      []any{instancePayload(instanceID, artefactID, img.Repository, string(tagsJSON))},
+		Objects:      []any{newArtefactInstance(instanceID, artefactID, img.Repository, string(tagsJSON))},
 	}
 
 	for _, c := range s.subscribers {
@@ -194,38 +200,36 @@ func artefactIDFromDigest(digest string) uuid.UUID {
 	return uuid.NewSHA1(artefactNamespace, []byte(digest))
 }
 
-func artefactPayload(id uuid.UUID, img scanner.Image) map[string]any {
+func newArtefact(id uuid.UUID, img scanner.Image) artifact.Artifact {
 	hash := img.Digest
 	if strings.HasPrefix(img.Digest, "sha256:") {
 		hash = "SHA256:" + strings.TrimPrefix(img.Digest, "sha256:")
 	}
-	displayName := img.Digest[:19] + "..."
+	displayName := img.Digest
+	if len(displayName) > 19 {
+		displayName = displayName[:19] + "..."
+	}
 	if len(img.Tags) > 0 {
 		displayName = img.Tags[0] + " (" + displayName + ")"
 	}
-	description := fmt.Sprintf("OCI image from %s", img.Repository)
-	return map[string]any{
-		"artifactId":  id.String(),
-		"displayName": displayName,
-		"description": description,
-		"hash":        hash,
-		"annotations": []map[string]any{
-			{"key": "emeland.io/oci-registry-sensor/known-tags", "value": mustJSON(img.Tags)},
-		},
-	}
+
+	a := artifact.NewArtifact(id)
+	a.SetDisplayName(displayName)
+	a.SetDescription(fmt.Sprintf("OCI image from %s", img.Repository))
+	a.SetHash(hash)
+	a.GetAnnotations().Add(annotationKnownTags, mustJSON(img.Tags))
+	return a
 }
 
-func instancePayload(id, artefactID uuid.UUID, repository, tagsJSON string) map[string]any {
-	return map[string]any{
-		"artifactInstanceId": id.String(),
-		"displayName":        repository,
-		"description":        fmt.Sprintf("Copy in registry %s", repository),
-		"artifact":           artefactID.String(),
-		"annotations": []map[string]any{
-			{"key": "emeland.io/p8-artifact-instance-location", "value": mustJSON([]string{repository})},
-			{"key": "emeland.io/oci-registry-sensor/known-tags", "value": tagsJSON},
-		},
-	}
+func newArtefactInstance(id, artefactID uuid.UUID, repository, tagsJSON string) artifact.ArtifactInstance {
+	ai := artifact.NewArtifactInstance(id)
+	ai.SetDisplayName(repository)
+	ai.SetDescription(fmt.Sprintf("Copy in registry %s", repository))
+	ai.SetArtifactRef(&artifact.ArtifactRef{ArtifactId: artefactID})
+	ann := ai.GetAnnotations()
+	ann.Add(annotationLocation, mustJSON([]string{repository}))
+	ann.Add(annotationKnownTags, tagsJSON)
+	return ai
 }
 
 func mustJSON(v any) string {
