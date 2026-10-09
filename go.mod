@@ -6,7 +6,7 @@ require (
 	github.com/google/go-containerregistry v0.20.3
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.11.1
-	go.emeland.io/modelsrv v0.10.3
+	go.emeland.io/modelsrv v0.12.1
 	go.uber.org/zap v1.27.0
 	gopkg.in/yaml.v3 v3.0.1
 )
